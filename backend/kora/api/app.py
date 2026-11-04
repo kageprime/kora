@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -14,6 +14,9 @@ from kora.api.schemas import (
     HealthOut,
     ProfileOut,
     ResolveRequest,
+    ReviewItemOut,
+    ReviewItemUpdate,
+    ReviewQueueOut,
     ScholarSummary,
 )
 from kora.http import HttpClient
@@ -24,7 +27,14 @@ from kora.storage.database import (
     database_ok,
     init_schema,
 )
-from kora.storage.repository import get_profile, list_scholars, save_profile
+from kora.storage.repository import (
+    get_profile,
+    get_review_item,
+    list_review_items,
+    list_scholars,
+    save_profile,
+    update_review_item,
+)
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +145,57 @@ def create_app(
         if profile is None:
             raise HTTPException(status_code=404, detail="Scholar not found")
         return ProfileOut.from_model(profile, scholar_id=scholar_id, stored=True)
+
+    @app.get("/v1/review", response_model=ReviewQueueOut, tags=["review"])
+    async def review_queue(
+        status: Literal[
+            "pending", "resolved", "dismissed", "superseded", "all"
+        ] = "pending",
+        kind: Literal["grey_identity", "flagged_record"] | None = None,
+        scholar_id: int | None = Query(default=None, ge=1),
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        session: AsyncSession = Depends(get_session),
+    ) -> ReviewQueueOut:
+        items, total = await list_review_items(
+            session,
+            status=None if status == "all" else status,
+            kind=kind,
+            scholar_id=scholar_id,
+            limit=limit,
+            offset=offset,
+        )
+        return ReviewQueueOut(
+            items=[ReviewItemOut.model_validate(item) for item in items],
+            total=total,
+        )
+
+    @app.get(
+        "/v1/review/{item_id}", response_model=ReviewItemOut, tags=["review"]
+    )
+    async def review_item(
+        item_id: int,
+        session: AsyncSession = Depends(get_session),
+    ) -> ReviewItemOut:
+        item = await get_review_item(session, item_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Review item not found")
+        return ReviewItemOut.model_validate(item)
+
+    @app.patch(
+        "/v1/review/{item_id}", response_model=ReviewItemOut, tags=["review"]
+    )
+    async def resolve_review_item(
+        item_id: int,
+        body: ReviewItemUpdate,
+        session: AsyncSession = Depends(get_session),
+    ) -> ReviewItemOut:
+        item = await update_review_item(
+            session, item_id, status=body.status, note=body.note
+        )
+        if item is None:
+            raise HTTPException(status_code=404, detail="Review item not found")
+        return ReviewItemOut.model_validate(item)
 
     return app
 

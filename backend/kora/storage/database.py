@@ -35,7 +35,7 @@ def _env_cache_dir() -> Path | None:
 @dataclass(frozen=True)
 class Settings:
     database_url: str = DEFAULT_DATABASE_URL
-    auto_create_schema: bool = True
+    auto_create_schema: bool = False
     cache_dir: Path | None = field(default_factory=default_cache_dir)
     title: str = "Kora API"
     version: str = __version__
@@ -44,7 +44,7 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls(
             database_url=os.getenv("KORA_DATABASE_URL", DEFAULT_DATABASE_URL),
-            auto_create_schema=_env_bool("KORA_AUTO_CREATE_SCHEMA", True),
+            auto_create_schema=_env_bool("KORA_AUTO_CREATE_SCHEMA", False),
             cache_dir=_env_cache_dir(),
         )
 

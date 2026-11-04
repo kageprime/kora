@@ -34,12 +34,14 @@ def build_profile() -> Profile:
     )
     openlibrary = RawPerson("openlibrary", "OL1A", "Chinua Achebe", works_count=200)
     openalex = RawPerson("openalex", "A1", "Chinua Achebe", works_count=500)
+    grey = RawPerson("openalex", "A-grey", "C. Achebe", works_count=3)
     person = Person(
         "Chinua Achebe",
         identities=[
             LinkedIdentity(wikidata, Confidence.HARD_ID, ["identity hub"]),
             LinkedIdentity(openlibrary, Confidence.HARD_ID, ["shared openlibrary ID"]),
             LinkedIdentity(openalex, Confidence.HIGH, ["name 100% similar"]),
+            LinkedIdentity(grey, Confidence.GREY, ["name-only match"]),
         ],
         description="Nigerian writer",
         birth_year=1930,

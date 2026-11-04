@@ -67,6 +67,8 @@ def test_health_and_resolve_persist_roundtrip(client):
     assert rows[0]["work_count"] == 3
     assert rows[0]["about_count"] == 1
     assert rows[0]["updated_at"]
+    assert rows[0]["refreshed_at"]
+    assert rows[0]["refresh_error"] is None
 
     stored = client.get("/v1/scholars/1")
     assert stored.status_code == 200
@@ -109,3 +111,47 @@ def test_persist_false_does_not_write(client):
     assert response.json()["scholar_id"] is None
     assert client.get("/v1/scholars").json() == []
     assert client.fake_aggregator.calls[-1] == ("Chinua Achebe", 0, False)
+
+
+def test_review_queue_and_decision(client):
+    client.post("/v1/profiles/resolve", json={"query": "Chinua Achebe"})
+
+    queue = client.get("/v1/review")
+    assert queue.status_code == 200
+    body = queue.json()
+    assert body["total"] == 2
+    assert {item["kind"] for item in body["items"]} == {
+        "grey_identity",
+        "flagged_record",
+    }
+    grey = next(item for item in body["items"] if item["kind"] == "grey_identity")
+    assert grey["status"] == "pending"
+    assert grey["payload"]["person"]["source_id"] == "A-grey"
+
+    patched = client.patch(
+        f"/v1/review/{grey['id']}",
+        json={"status": "resolved", "note": "Confirmed with an ORCID match."},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["status"] == "resolved"
+    assert patched.json()["note"] == "Confirmed with an ORCID match."
+    assert patched.json()["resolved_at"]
+
+    flagged = client.get("/v1/review?kind=flagged_record").json()
+    assert flagged["total"] == 1
+    assert flagged["items"][0]["kind"] == "flagged_record"
+
+    all_items = client.get("/v1/review?status=all&scholar_id=1").json()
+    assert all_items["total"] == 2
+    assert {item["status"] for item in all_items["items"]} == {
+        "resolved",
+        "pending",
+    }
+
+    assert client.get("/v1/review/999").status_code == 404
+    assert client.patch(
+        "/v1/review/999", json={"status": "dismissed"}
+    ).status_code == 404
+    assert client.patch(
+        f"/v1/review/{grey['id']}", json={"status": "bogus"}
+    ).status_code == 422

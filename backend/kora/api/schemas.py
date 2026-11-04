@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from kora.models import (
     AccessLink,
@@ -314,6 +315,33 @@ class ScholarSummary(BaseModel):
     work_count: int = 0
     about_count: int = 0
     updated_at: datetime | None = None
+    refreshed_at: datetime | None = None
+    refresh_error: str | None = None
+
+
+class ReviewItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    scholar_id: int
+    kind: str
+    status: str
+    title: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    note: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+class ReviewQueueOut(BaseModel):
+    items: list[ReviewItemOut] = Field(default_factory=list)
+    total: int = 0
+
+
+class ReviewItemUpdate(BaseModel):
+    status: str = Field(pattern="^(pending|resolved|dismissed)$")
+    note: str | None = Field(default=None, max_length=2000)
 
 
 class HealthOut(BaseModel):

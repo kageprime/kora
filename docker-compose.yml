@@ -15,5 +15,26 @@ services:
       timeout: 5s
       retries: 10
 
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      KORA_DATABASE_URL: postgresql+psycopg://kora:kora@db:5432/kora
+      KORA_AUTO_CREATE_SCHEMA: "false"
+      KORA_CACHE_DIR: /data/cache
+    ports:
+      - "8000:8000"
+    volumes:
+      - kora_cache:/data/cache
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && uvicorn kora.api.app:app --host 0.0.0.0 --port 8000
+
 volumes:
   kora_pgdata:
+  kora_cache:

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kora.models import (
@@ -46,6 +47,16 @@ def work_key(work: Work) -> str:
     first_author = name_key(work.authors[0]) if work.authors else ""
     year = "" if work.category == WorkCategory.BOOK else str(work.year or "")
     payload = "|".join([work.category.value, title, year, first_author])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+REVIEW_KINDS = ("grey_identity", "flagged_record")
+REVIEW_STATUSES = ("pending", "resolved", "dismissed", "superseded")
+
+
+def review_fingerprint(kind: str, source: str, source_id: str) -> str:
+    """Stable identity for a review item, independent of mutable payload text."""
+    payload = f"{kind}|{source}|{source_id}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -180,9 +191,76 @@ async def save_profile(session: AsyncSession, profile: Profile) -> int:
     snapshot.raw_work_count = profile.raw_work_count
     snapshot.alternatives = [_person_to_json(p) for p in profile.alternatives]
     snapshot.flagged = [_raw_work_to_json(r) for r in profile.flagged]
+    snapshot.refreshed_at = func.now()
+    snapshot.last_attempted_at = func.now()
+    snapshot.refresh_error = None
+
+    await _sync_review_items(session, scholar, profile)
 
     await session.commit()
     return scholar.id
+
+
+async def _sync_review_items(
+    session: AsyncSession, scholar: t.Scholar, profile: Profile
+) -> None:
+    """Upsert the current grey identities and flagged records as review items."""
+    wanted: dict[tuple[str, str], dict[str, Any]] = {}
+    for identity in profile.person.identities:
+        if identity.confidence != Confidence.GREY:
+            continue
+        raw = identity.person
+        kind = "grey_identity"
+        fingerprint = review_fingerprint(kind, raw.source, raw.source_id)
+        wanted[(kind, fingerprint)] = {
+            "title": f"{raw.name} — {raw.source}:{raw.source_id}"[:1000],
+            "payload": {
+                "person": _raw_person_to_json(raw),
+                "evidence": list(identity.evidence),
+            },
+        }
+
+    for record in profile.flagged:
+        kind = "flagged_record"
+        fingerprint = review_fingerprint(kind, record.source, record.source_id)
+        wanted[(kind, fingerprint)] = {
+            "title": record.title[:1000],
+            "payload": {"record": _raw_work_to_json(record)},
+        }
+
+    existing = (
+        await session.scalars(
+            select(t.ReviewItem).where(t.ReviewItem.scholar_id == scholar.id)
+        )
+    ).all()
+    by_key = {(row.kind, row.fingerprint): row for row in existing}
+
+    for (kind, fingerprint), data in wanted.items():
+        row = by_key.get((kind, fingerprint))
+        if row is None:
+            session.add(
+                t.ReviewItem(
+                    scholar_id=scholar.id,
+                    kind=kind,
+                    status="pending",
+                    fingerprint=fingerprint,
+                    title=data["title"],
+                    payload=data["payload"],
+                )
+            )
+            continue
+        row.title = data["title"]
+        row.payload = data["payload"]
+        if row.status == "superseded":
+            row.status = "pending"
+            row.resolved_at = None
+
+    for row in existing:
+        if (row.kind, row.fingerprint) in wanted:
+            continue
+        if row.status == "pending":
+            row.status = "superseded"
+            row.resolved_at = func.now()
 
 
 async def _save_identities(session: AsyncSession, scholar: t.Scholar, person: Person) -> None:
@@ -458,42 +536,177 @@ def _record_from_row(row: t.WorkRecord, relation: Relation) -> RawWork:
 async def list_scholars(
     session: AsyncSession, *, limit: int = 50, offset: int = 0
 ) -> list[dict[str, Any]]:
-    scholars = (
-        await session.scalars(
-            select(t.Scholar)
+    by_count = (
+        select(func.count())
+        .select_from(t.ScholarWork)
+        .where(
+            t.ScholarWork.scholar_id == t.Scholar.id,
+            t.ScholarWork.relation == Relation.BY.value,
+        )
+        .correlate(t.Scholar)
+        .scalar_subquery()
+    )
+    about_count = (
+        select(func.count())
+        .select_from(t.ScholarWork)
+        .where(
+            t.ScholarWork.scholar_id == t.Scholar.id,
+            t.ScholarWork.relation == Relation.ABOUT.value,
+        )
+        .correlate(t.Scholar)
+        .scalar_subquery()
+    )
+    rows = (
+        await session.execute(
+            select(
+                t.Scholar,
+                t.ScholarProfile,
+                by_count.label("work_count"),
+                about_count.label("about_count"),
+            )
+            .outerjoin(
+                t.ScholarProfile, t.ScholarProfile.scholar_id == t.Scholar.id
+            )
             .order_by(t.Scholar.updated_at.desc(), t.Scholar.display_name)
             .limit(limit)
             .offset(offset)
         )
     ).all()
-    out: list[dict[str, Any]] = []
-    for scholar in scholars:
-        by_count = await session.scalar(
-            select(func.count())
-            .select_from(t.ScholarWork)
-            .where(
-                t.ScholarWork.scholar_id == scholar.id,
-                t.ScholarWork.relation == Relation.BY.value,
+    return [
+        {
+            "id": scholar.id,
+            "display_name": scholar.display_name,
+            "birth_year": scholar.birth_year,
+            "death_year": scholar.death_year,
+            "description": scholar.description,
+            "work_count": work_count or 0,
+            "about_count": about_count_value or 0,
+            "updated_at": scholar.updated_at,
+            "refreshed_at": snapshot.refreshed_at if snapshot else None,
+            "refresh_error": snapshot.refresh_error if snapshot else None,
+        }
+        for scholar, snapshot, work_count, about_count_value in rows
+    ]
+
+
+async def mark_refresh_failed(
+    session: AsyncSession, scholar_id: int, error: str
+) -> None:
+    """Record a failed refresh without disturbing the last successful snapshot."""
+    snapshot = await session.scalar(
+        select(t.ScholarProfile).where(t.ScholarProfile.scholar_id == scholar_id)
+    )
+    if snapshot is None:
+        scholar = await session.get(t.Scholar, scholar_id)
+        if scholar is None:
+            return
+        snapshot = t.ScholarProfile(
+            scholar_id=scholar_id,
+            query=scholar.display_name,
+            source_status={},
+            raw_work_count=0,
+            alternatives=[],
+            flagged=[],
+        )
+        session.add(snapshot)
+    snapshot.last_attempted_at = func.now()
+    snapshot.refresh_error = error[:2000]
+    await session.commit()
+
+
+async def list_refresh_candidates(
+    session: AsyncSession,
+    *,
+    limit: int = 50,
+    stale_hours: int | None = None,
+    scholar_ids: list[int] | None = None,
+) -> list[dict[str, Any]]:
+    statement = (
+        select(t.Scholar, t.ScholarProfile)
+        .outerjoin(t.ScholarProfile, t.ScholarProfile.scholar_id == t.Scholar.id)
+        .order_by(
+            t.ScholarProfile.last_attempted_at.asc().nullsfirst(),
+            t.Scholar.display_name,
+        )
+        .limit(limit)
+    )
+    if scholar_ids:
+        statement = statement.where(t.Scholar.id.in_(scholar_ids))
+    if stale_hours is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_hours)
+        statement = statement.where(
+            or_(
+                t.ScholarProfile.last_attempted_at.is_(None),
+                t.ScholarProfile.last_attempted_at < cutoff,
             )
         )
-        about_count = await session.scalar(
-            select(func.count())
-            .select_from(t.ScholarWork)
-            .where(
-                t.ScholarWork.scholar_id == scholar.id,
-                t.ScholarWork.relation == Relation.ABOUT.value,
-            )
+    rows = (await session.execute(statement)).all()
+    return [
+        {
+            "id": scholar.id,
+            "scholar_key": scholar.scholar_key,
+            "display_name": scholar.display_name,
+            "query": snapshot.query if snapshot else scholar.display_name,
+            "last_attempted_at": (
+                snapshot.last_attempted_at if snapshot else None
+            ),
+        }
+        for scholar, snapshot in rows
+    ]
+
+
+async def list_review_items(
+    session: AsyncSession,
+    *,
+    status: str | None = "pending",
+    kind: str | None = None,
+    scholar_id: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[t.ReviewItem], int]:
+    filters = []
+    if status is not None and status != "all":
+        filters.append(t.ReviewItem.status == status)
+    if kind is not None:
+        filters.append(t.ReviewItem.kind == kind)
+    if scholar_id is not None:
+        filters.append(t.ReviewItem.scholar_id == scholar_id)
+
+    total = await session.scalar(
+        select(func.count()).select_from(t.ReviewItem).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(t.ReviewItem)
+            .where(*filters)
+            .order_by(t.ReviewItem.created_at.desc(), t.ReviewItem.id.desc())
+            .limit(limit)
+            .offset(offset)
         )
-        out.append(
-            {
-                "id": scholar.id,
-                "display_name": scholar.display_name,
-                "birth_year": scholar.birth_year,
-                "death_year": scholar.death_year,
-                "description": scholar.description,
-                "work_count": by_count or 0,
-                "about_count": about_count or 0,
-                "updated_at": scholar.updated_at,
-            }
-        )
-    return out
+    ).all()
+    return list(rows), total or 0
+
+
+async def get_review_item(
+    session: AsyncSession, item_id: int
+) -> t.ReviewItem | None:
+    return await session.get(t.ReviewItem, item_id)
+
+
+async def update_review_item(
+    session: AsyncSession,
+    item_id: int,
+    *,
+    status: str,
+    note: str | None = None,
+) -> t.ReviewItem | None:
+    item = await session.get(t.ReviewItem, item_id)
+    if item is None:
+        return None
+    item.status = status
+    if note is not None:
+        item.note = note[:2000]
+    item.resolved_at = func.now() if status != "pending" else None
+    await session.commit()
+    await session.refresh(item)
+    return item

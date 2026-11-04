@@ -1,0 +1,10 @@
+.git
+.github
+backend/.venv
+backend/.cache
+backend/.pytest_cache
+backend/.out
+backend/*.egg-info
+**/__pycache__
+**/*.pyc
+.env

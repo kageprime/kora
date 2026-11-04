@@ -13,6 +13,7 @@ from sqlalchemy import (
     JSON,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -52,6 +53,9 @@ class Scholar(Base):
     )
     profile: Mapped[ScholarProfile | None] = relationship(
         back_populates="scholar", cascade="all, delete-orphan", uselist=False
+    )
+    review_items: Mapped[list[ReviewItem]] = relationship(
+        back_populates="scholar", cascade="all, delete-orphan"
     )
 
 
@@ -197,5 +201,45 @@ class ScholarProfile(Base):
     refreshed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refresh_error: Mapped[str | None] = mapped_column(Text)
 
     scholar: Mapped[Scholar] = relationship(back_populates="profile")
+
+
+class ReviewItem(Base):
+    """A durable queue item for an ambiguous identity or a suspect record.
+
+    Items are scoped to a scholar and identified by a stable fingerprint so a
+    repeated profile resolution updates the same item instead of duplicating it.
+    Resolved/dismissed decisions survive later refreshes; pending items that no
+    longer reproduce are marked ``superseded`` rather than deleted.
+    """
+
+    __tablename__ = "review_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "scholar_id", "kind", "fingerprint", name="uq_review_item"
+        ),
+        Index("ix_review_items_status_kind", "status", "kind"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scholar_id: Mapped[int] = mapped_column(
+        ForeignKey("scholars.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(1000))
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    scholar: Mapped[Scholar] = relationship(back_populates="review_items")

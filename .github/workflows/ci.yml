@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "./backend[dev]"
+      - name: Unit and API tests
+        working-directory: backend
+        run: pytest -q -m "not live and not postgres"
+
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: kora
+          POSTGRES_PASSWORD: kora
+          POSTGRES_DB: kora
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kora -d kora"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      KORA_DATABASE_URL: postgresql+psycopg://kora:kora@localhost:5432/kora_migration
+      KORA_TEST_DATABASE_URL: postgresql+psycopg://kora:kora@localhost:5432/kora_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "./backend[dev]"
+      - name: Create databases
+        run: |
+          PGPASSWORD=kora psql -h localhost -U kora -d kora -c "CREATE DATABASE kora_test"
+          PGPASSWORD=kora psql -h localhost -U kora -d kora -c "CREATE DATABASE kora_migration"
+      - name: Apply migrations
+        working-directory: backend
+        run: alembic upgrade head
+      - name: Check model/migration drift
+        working-directory: backend
+        run: alembic check
+      - name: Postgres and offline tests
+        working-directory: backend
+        run: pytest -q -m "not live"
