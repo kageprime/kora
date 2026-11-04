@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local Kora data and generated profiles
+backend/.cache/
+backend/.out/
+backend/achebe.json
+backend/out.json
+*.sqlite3
+*.db
+
+# Environment/secrets
+.env
+.env.*
+!.env.example
+
+# Logs and OS/editor junk
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
