@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 DEFAULT_MAILTO = os.getenv("KORA_MAILTO", "dev@example.com")
-USER_AGENT = f"KoraAggregator/0.1 (+https://github.com/; mailto:{DEFAULT_MAILTO})"
+USER_AGENT = f"KoraAggregator/0.2 (+https://github.com/; mailto:{DEFAULT_MAILTO})"
 
 
 class HttpClient:
