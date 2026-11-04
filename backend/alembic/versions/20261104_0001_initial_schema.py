@@ -192,12 +192,7 @@ def upgrade() -> None:
         sa.Column("raw_work_count", sa.Integer(), nullable=False),
         sa.Column("alternatives", sa.JSON(), nullable=False),
         sa.Column("flagged", sa.JSON(), nullable=False),
-        sa.Column(
-            "refreshed_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
+        sa.Column("refreshed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_attempted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("refresh_error", sa.Text(), nullable=True),
         sa.ForeignKeyConstraint(
